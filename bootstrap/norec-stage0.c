@@ -5556,7 +5556,7 @@ static Ast *parser_parse_value_decl(Parser *parser, bool is_struct,
 }
 
 /* Static string for the synthesized "_len" field name */
-static const char *g_table_len_field = "_len";
+static const char *g_table_len_field = "ni__len";
 
 /* Parse table declaration: table Name { field: Type, ... }
  * Generates a struct (columnar) and a value (row) in g_value_table,
@@ -5731,7 +5731,7 @@ static Ast *parser_parse_table_decl(Parser *parser, bool is_public) {
     }
     /* _len field */
     struct_fields[field_count].name_start = g_table_len_field;
-    struct_fields[field_count].name_length = 4;
+    struct_fields[field_count].name_length = 7;
     struct_fields[field_count].type = TYPE_I64;
     struct_fields[field_count].is_ref = false;
     struct_fields[field_count].is_mut_ref = false;
@@ -10759,7 +10759,7 @@ static void codegen_emit_mangled_name(FILE *out, const char *name, size_t name_l
                 (int)g_modules[module_id].alias_length, g_modules[module_id].alias,
                 (int)name_len, name);
     } else {
-        fprintf(out, "ni_%.*s", (int)name_len, name);
+        fprintf(out, "%.*s", (int)name_len, name);
     }
 }
 
@@ -10774,7 +10774,7 @@ static const char *codegen_mangled_name_str(const char *name, size_t name_len,
                  (int)g_modules[module_id].alias_length, g_modules[module_id].alias,
                  (int)name_len, name);
     } else {
-        snprintf(buf, 128, "ni_%.*s", (int)name_len, name);
+        snprintf(buf, 128, "%.*s", (int)name_len, name);
     }
     /* Replace dots with underscores (for Table.Row types) */
     for (char *p = buf; *p; p++) {
@@ -10859,7 +10859,7 @@ static void codegen_emit_f64_literal(FILE *out, double value) {
     char buf[64];
     bool has_float_marker = false;
 
-    snprintf(buf, sizeof(buf), "%.17g", value);
+    snprintf(buf, sizeof(buf), "%.16g", value);
     for (char *p = buf; *p; p++) {
         if (*p == '.' || *p == 'e' || *p == 'E') {
             has_float_marker = true;
@@ -10899,9 +10899,9 @@ static void codegen_emit_identifier(FILE *out, const char *name_start, size_t na
         }
     }
     if (codegen_is_ref(name_start, name_length)) {
-        fprintf(out, "(*ni_%.*s)", (int)name_length, name_start);
+        fprintf(out, "(*%.*s)", (int)name_length, name_start);
     } else {
-        fprintf(out, "ni_%.*s", (int)name_length, name_start);
+        fprintf(out, "%.*s", (int)name_length, name_start);
     }
 }
 
@@ -10919,13 +10919,13 @@ static void codegen_emit_field(FILE *out, Ast *node,
     Ast *obj = node->as.field_access.object;
     if (obj->kind == AST_IDENTIFIER &&
         codegen_is_ref(obj->as.identifier.start, obj->as.identifier.length)) {
-        fprintf(out, "ni_%.*s->ni_%.*s",
+        fprintf(out, "%.*s->%.*s",
                 (int)obj->as.identifier.length, obj->as.identifier.start,
                 (int)node->as.field_access.field_length,
                 node->as.field_access.field_start);
     } else {
         emit_object_fn(out, obj);
-        fprintf(out, ".ni_%.*s", (int)node->as.field_access.field_length,
+        fprintf(out, ".%.*s", (int)node->as.field_access.field_length,
                 node->as.field_access.field_start);
     }
 }
@@ -10962,13 +10962,13 @@ static void codegen_emit_target_path(FILE *out, Ast *node,
             } else if (obj->kind == AST_IDENTIFIER &&
                        codegen_is_ref(obj->as.identifier.start,
                                       obj->as.identifier.length)) {
-                fprintf(out, "ni_%.*s->ni_%.*s",
+                fprintf(out, "%.*s->%.*s",
                         (int)obj->as.identifier.length, obj->as.identifier.start,
                         (int)node->as.field_access.field_length,
                         node->as.field_access.field_start);
             } else {
                 codegen_emit_target_path(out, obj, temps, temp_count);
-                fprintf(out, ".ni_%.*s",
+                fprintf(out, ".%.*s",
                         (int)node->as.field_access.field_length,
                         node->as.field_access.field_start);
             }
@@ -10976,15 +10976,24 @@ static void codegen_emit_target_path(FILE *out, Ast *node,
         }
 
         case AST_INDEX_ACCESS: {
-            int temp_idx = codegen_find_target_index_temp(temps, temp_count,
-                                                          node);
-            codegen_emit_target_path(out, node->as.index_access.object,
-                                     temps, temp_count);
-            fprintf(out, ".data[");
-            if (temp_idx >= 0) {
-                codegen_emit_target_index_name(out, temp_idx);
-            } else {
-                codegen_emit_expression(out, node->as.index_access.index);
+            Ast *index_expr = node->as.index_access.index;
+            if (index_expr->kind == AST_IDENTIFIER) {
+                codegen_emit_target_path(out, node->as.index_access.object,
+                                         temps, temp_count);
+                fprintf(out, ".data[");
+                codegen_emit_expression(out, index_expr);
+            }
+            else {
+                int temp_idx = codegen_find_target_index_temp(temps, temp_count,
+                                                              node);
+                codegen_emit_target_path(out, node->as.index_access.object,
+                                         temps, temp_count);
+                fprintf(out, ".data[");
+                if (temp_idx >= 0) {
+                    codegen_emit_target_index_name(out, temp_idx);
+                } else {
+                    codegen_emit_expression(out, index_expr);
+                }
             }
             fprintf(out, "]");
             break;
@@ -11084,6 +11093,8 @@ static void codegen_emit_slice_tail(FILE *out, Ast *node, Ast *obj, Type obj_typ
     fprintf(out, ", \"%s\", %zuUL, %zuUL)",
             node->loc.file, node->loc.line, node->loc.column);
 }
+
+static int g_bounds_check = 1;
 
 /* Emit a byte buffer argument, coercing [u8; N] arrays to ni_slice_0 */
 static void codegen_emit_byte_buf(FILE *out, Ast *arg) {
@@ -11197,7 +11208,7 @@ static void codegen_emit_expression(FILE *out, Ast *node) {
                         ArrayTypeEntry *ae = array_table_get(arg_type);
                         Type slice_elem = type_element_type(param_type);
                         /* If arg is an index access, emit bounds check inline */
-                        if (arg->kind == AST_INDEX_ACCESS) {
+                        if (g_bounds_check && arg->kind == AST_INDEX_ACCESS) {
                             Ast *idx_obj = arg->as.index_access.object;
                             Type idx_obj_type = idx_obj->expr_type;
                             fprintf(out, "(NI_BOUNDS_CHECK(");
@@ -11218,7 +11229,7 @@ static void codegen_emit_expression(FILE *out, Ast *node) {
                                 codegen_type_to_c(slice_elem));
                         codegen_emit_lvalue(out, arg);
                         fprintf(out, ".data, .len = %zuL}", ae ? ae->size : 0);
-                        if (arg->kind == AST_INDEX_ACCESS) {
+                        if (g_bounds_check && arg->kind == AST_INDEX_ACCESS) {
                             fprintf(out, ")");
                         }
                     } else {
@@ -11265,7 +11276,7 @@ static void codegen_emit_expression(FILE *out, Ast *node) {
             for (size_t i = 0; i < node->as.value_constructor.field_count; i++) {
                 if (i > 0) fprintf(out, ", ");
                 FieldInit *fi = &node->as.value_constructor.fields[i];
-                fprintf(out, ".ni_%.*s = ", (int)fi->name_length, fi->name_start);
+                fprintf(out, ".%.*s = ", (int)fi->name_length, fi->name_start);
                 codegen_emit_expression(out, fi->value);
             }
             fprintf(out, "}");
@@ -11300,19 +11311,21 @@ static void codegen_emit_expression(FILE *out, Ast *node) {
 
             if (type_is_slice(obj_type)) {
                 /* Slice: runtime bounds check using .len */
-                fprintf(out, "(NI_BOUNDS_CHECK(");
-                codegen_emit_expression(out, node->as.index_access.index);
-                fprintf(out, ", ");
-                codegen_emit_expression(out, obj);
-                fprintf(out, ".len, \"%s\", %zuUL, %zuUL), ",
-                        node->loc.file, node->loc.line, node->loc.column);
+                if (g_bounds_check) {
+                    fprintf(out, "(NI_BOUNDS_CHECK(");
+                    codegen_emit_expression(out, node->as.index_access.index);
+                    fprintf(out, ", ");
+                    codegen_emit_expression(out, obj);
+                    fprintf(out, ".len, \"%s\", %zuUL, %zuUL), ",
+                            node->loc.file, node->loc.line, node->loc.column);
+                }
                 codegen_emit_expression(out, obj);
                 fprintf(out, ".data[");
                 codegen_emit_expression(out, node->as.index_access.index);
-                fprintf(out, "])");
+                fprintf(out, (g_bounds_check ? "])" : "]") );
             } else {
                 ArrayTypeEntry *at = array_table_get(obj_type);
-                if (at) {
+                if (g_bounds_check && at) {
                     fprintf(out, "(NI_BOUNDS_CHECK(");
                     codegen_emit_expression(out, node->as.index_access.index);
                     fprintf(out, ", %zu, \"%s\", %zuUL, %zuUL), ",
@@ -11323,7 +11336,7 @@ static void codegen_emit_expression(FILE *out, Ast *node) {
                 fprintf(out, ".data[");
                 codegen_emit_expression(out, node->as.index_access.index);
                 fprintf(out, "]");
-                if (at) fprintf(out, ")");
+                if (g_bounds_check && at) fprintf(out, ")");
             }
             break;
         }
@@ -11340,14 +11353,16 @@ static void codegen_emit_expression(FILE *out, Ast *node) {
                 break;
             }
 
-            fprintf(out, "(NI_SLICE_BOUNDS_CHECK(");
-            codegen_emit_slice_start(out, node);
-            fprintf(out, ", ");
-            codegen_emit_slice_end(out, node, obj, obj_type);
-            fprintf(out, ", ");
-            codegen_emit_obj_len(out, obj, obj_type);
-            fprintf(out, ", \"%s\", %zuUL, %zuUL), ",
-                    node->loc.file, node->loc.line, node->loc.column);
+            if (g_bounds_check) {
+                fprintf(out, "(NI_SLICE_BOUNDS_CHECK(");
+                codegen_emit_slice_start(out, node);
+                fprintf(out, ", ");
+                codegen_emit_slice_end(out, node, obj, obj_type);
+                fprintf(out, ", ");
+                codegen_emit_obj_len(out, obj, obj_type);
+                fprintf(out, ", \"%s\", %zuUL, %zuUL), ",
+                        node->loc.file, node->loc.line, node->loc.column);
+            }
             /* result slice literal */
             fprintf(out, "(%s){.data = (%s *)",
                     codegen_type_to_c(node->expr_type),
@@ -11362,7 +11377,7 @@ static void codegen_emit_expression(FILE *out, Ast *node) {
             codegen_emit_slice_end(out, node, obj, obj_type);
             fprintf(out, " - ");
             codegen_emit_slice_start(out, node);
-            fprintf(out, "})");
+            fprintf(out, (g_bounds_check ? "})" : "}") );
             break;
         }
 
@@ -11734,6 +11749,9 @@ static void codegen_prepare_target_indices(FILE *out, Ast *node, int indent,
 
     if (node->kind != AST_INDEX_ACCESS) return;
 
+    Ast *index_expr = node->as.index_access.index;
+    if (index_expr->kind == AST_IDENTIFIER) return;
+
     codegen_prepare_target_indices(out, node->as.index_access.object,
                                    indent, temps, temp_count);
 
@@ -11741,7 +11759,6 @@ static void codegen_prepare_target_indices(FILE *out, Ast *node, int indent,
     if (slot >= MAX_TARGET_INDEX_DEPTH) {
         panic(ERR_I002_INTERNAL_ERROR, "assignment target too deeply nested");
     }
-    Ast *index_expr = node->as.index_access.index;
     temps[slot].index_node = node;
     temps[slot].temp_idx = codegen_temp_counter++;
     (*temp_count)++;
@@ -11753,25 +11770,27 @@ static void codegen_prepare_target_indices(FILE *out, Ast *node, int indent,
     codegen_emit_expression(out, index_expr);
     fprintf(out, ";\n");
 
-    Type obj_type = node->as.index_access.object->expr_type;
-    if (type_is_slice(obj_type)) {
-        codegen_indent(out, indent);
-        fprintf(out, "NI_BOUNDS_CHECK(");
-        codegen_emit_target_index_name(out, temps[slot].temp_idx);
-        fprintf(out, ", ");
-        codegen_emit_target_path(out, node->as.index_access.object,
-                                 temps, *temp_count);
-        fprintf(out, ".len, \"%s\", %zuUL, %zuUL);\n",
-                node->loc.file, node->loc.line, node->loc.column);
-    } else {
-        ArrayTypeEntry *at = array_table_get(obj_type);
-        if (at) {
+    if (g_bounds_check) {
+        Type obj_type = node->as.index_access.object->expr_type;
+        if (type_is_slice(obj_type)) {
             codegen_indent(out, indent);
             fprintf(out, "NI_BOUNDS_CHECK(");
             codegen_emit_target_index_name(out, temps[slot].temp_idx);
-            fprintf(out, ", %zu, \"%s\", %zuUL, %zuUL);\n",
-                    at->size, node->loc.file,
-                    node->loc.line, node->loc.column);
+            fprintf(out, ", ");
+            codegen_emit_target_path(out, node->as.index_access.object,
+                                     temps, *temp_count);
+            fprintf(out, ".len, \"%s\", %zuUL, %zuUL);\n",
+                    node->loc.file, node->loc.line, node->loc.column);
+        } else {
+            ArrayTypeEntry *at = array_table_get(obj_type);
+            if (at) {
+                codegen_indent(out, indent);
+                fprintf(out, "NI_BOUNDS_CHECK(");
+                codegen_emit_target_index_name(out, temps[slot].temp_idx);
+                fprintf(out, ", %zu, \"%s\", %zuUL, %zuUL);\n",
+                        at->size, node->loc.file,
+                        node->loc.line, node->loc.column);
+            }
         }
     }
 }
@@ -11789,7 +11808,7 @@ static void codegen_emit_arena_frees(FILE *out, Scope *scope, int indent) {
         if (scope->vars[i].type == TYPE_ARENA && !scope->vars[i].is_ref &&
             !scope->vars[i].is_global) {
             codegen_indent(out, indent);
-            fprintf(out, "free(ni_%.*s.data);\n",
+            fprintf(out, "free(%.*s.data);\n",
                     (int)scope->vars[i].name_length,
                     scope->vars[i].name_start);
         }
@@ -12133,11 +12152,11 @@ static void codegen_emit_var_decl(FILE *out, const char *name_start, size_t name
             temp_idx = codegen_emit_if_to_temp(out, init, type, scope, indent);
         }
         codegen_indent(out, indent);
-        fprintf(out, "%s%s ni_%.*s = __expr_%d;\n",
+        fprintf(out, "%s%s %.*s = __expr_%d;\n",
                 const_prefix, type_str, (int)name_length, name_start, temp_idx);
     } else {
         codegen_indent(out, indent);
-        fprintf(out, "%s%s ni_%.*s = ",
+        fprintf(out, "%s%s %.*s = ",
                 const_prefix, type_str, (int)name_length, name_start);
         codegen_emit_expression_as_type(out, init, type);
         fprintf(out, ";\n");
@@ -12174,6 +12193,8 @@ static void codegen_emit_assignment_value(FILE *out, Ast *value, int temp_idx,
 }
 
 static void codegen_emit_statement(FILE *out, Ast *node, Scope **scope, int indent) {
+
+    fprintf(out, "#line %d \"%s\"\n", node->loc.line, node->loc.file);
     switch (node->kind) {
         case AST_VAL_DECL:
             scope_add(*scope, node->as.val_decl.name_start,
@@ -12323,9 +12344,9 @@ static void codegen_emit_statement(FILE *out, Ast *node, Scope **scope, int inde
             fprintf(out, ";\n");
 
             codegen_indent(out, indent);
-            fprintf(out, "for (int64_t ni_%.*s = (int64_t)", var_len, var);
+            fprintf(out, "for (int64_t %.*s = (int64_t)", var_len, var);
             codegen_emit_expression(out, node->as.for_stmt.start);
-            fprintf(out, "; ni_%.*s < __for_end_%d; ni_%.*s++) {\n",
+            fprintf(out, "; %.*s < __for_end_%d; %.*s++) {\n",
                     var_len, var, end_temp, var_len, var);
 
             /* Emit body with loop variable injected into scope */
@@ -12467,7 +12488,7 @@ static void codegen_emit_global_decl(FILE *out, Ast *node) {
         for (size_t i = 0; i < init->as.value_constructor.field_count; i++) {
             if (i > 0) fprintf(out, ", ");
             FieldInit *fi = &init->as.value_constructor.fields[i];
-            fprintf(out, ".ni_%.*s = ", (int)fi->name_length, fi->name_start);
+            fprintf(out, ".%.*s = ", (int)fi->name_length, fi->name_start);
             codegen_emit_expression(out, fi->value);
         }
         fprintf(out, "};\n");
@@ -12546,16 +12567,16 @@ static void codegen_emit_function_params(FILE *out, Ast *func_decl, bool is_main
         if (i > 0) fprintf(out, ", ");
         if (type_is_slice(param->type)) {
             /* Slice: passed by value as fat pointer struct */
-            fprintf(out, "%s ni_%.*s", codegen_type_to_c(param->type),
+            fprintf(out, "%s %.*s", codegen_type_to_c(param->type),
                     (int)param->name_length, param->name_start);
         } else if (param->is_mut_ref) {
-            fprintf(out, "%s *ni_%.*s", codegen_type_to_c(param->type),
+            fprintf(out, "%s *%.*s", codegen_type_to_c(param->type),
                     (int)param->name_length, param->name_start);
         } else if (param->is_ref) {
-            fprintf(out, "const %s *ni_%.*s", codegen_type_to_c(param->type),
+            fprintf(out, "const %s *%.*s", codegen_type_to_c(param->type),
                     (int)param->name_length, param->name_start);
         } else {
-            fprintf(out, "%s ni_%.*s", codegen_type_to_c(param->type),
+            fprintf(out, "%s %.*s", codegen_type_to_c(param->type),
                     (int)param->name_length, param->name_start);
         }
     }
@@ -12593,6 +12614,7 @@ static void codegen_emit_function_prototype(FILE *out, Ast *func_decl) {
 static void codegen_emit_function(FILE *out, Ast *func_decl) {
     bool is_main = codegen_function_is_main(func_decl);
 
+    fprintf(out, "#line %d \"%s\"\n", func_decl->loc.line, func_decl->loc.file);
     codegen_emit_function_signature(out, func_decl);
     fprintf(out, " {\n");
 
@@ -12724,7 +12746,7 @@ static void codegen_emit_ir(FILE *out, Ast *ast) {
     }
 
     /* Emit bounds check helper and macro if any array or slice types exist */
-    if (g_array_table->count > 0 || g_slice_table->count > 0) {
+    if (g_bounds_check && (g_array_table->count > 0 || g_slice_table->count > 0)) {
         fprintf(out, "static void ni_bounds_fail(int64_t idx, size_t size,\n");
         fprintf(out, "                           const char *file, unsigned long line, unsigned long col) {\n");
         fprintf(out, "    fprintf(stderr, \"%%s:%%lu:%%lu: error[R002]: Array index out of bounds: %%ld not in [0, %%zu)\\n\",\n");
@@ -12852,7 +12874,7 @@ static void codegen_emit_ir(FILE *out, Ast *ast) {
                 fprintf(out, "typedef struct {");
                 for (size_t f = 0; f < vt->field_count; f++) {
                     Parameter *field = &vt->fields[f];
-                    fprintf(out, " %s ni_%.*s;", codegen_type_to_c(field->type),
+                    fprintf(out, " %s %.*s;", codegen_type_to_c(field->type),
                             (int)field->name_length, field->name_start);
                 }
                 fprintf(out, " } %s;\n",
@@ -12891,7 +12913,9 @@ static void codegen_emit_ir(FILE *out, Ast *ast) {
         fprintf(out, "static inline ni_slice_%zu ni_slice_%zu_tail(ni_slice_%zu ni_value, int64_t ni_start,\n",
                 i, i, i);
         fprintf(out, "                                            const char *ni_file, unsigned long ni_line, unsigned long ni_col) {\n");
-        fprintf(out, "    NI_SLICE_BOUNDS_CHECK(ni_start, ni_value.len, ni_value.len, ni_file, ni_line, ni_col);\n");
+        if (g_bounds_check) {
+            fprintf(out, "    NI_SLICE_BOUNDS_CHECK(ni_start, ni_value.len, ni_value.len, ni_file, ni_line, ni_col);\n");
+        }
         fprintf(out, "    return (ni_slice_%zu){.data = ni_value.data + ni_start, .len = (ni_value.len - ni_start)};\n", i);
         fprintf(out, "}\n");
     }
@@ -13070,7 +13094,7 @@ static void codegen_emit_ir(FILE *out, Ast *ast) {
         for (size_t f = 0; f < te->field_count; f++) {
             Type slice_type = struct_vt->fields[f].type;
             Type elem_type = type_element_type(slice_type);
-            fprintf(out, "\n        .ni_%.*s = (%s){.data = (%s *)ni_arena_alloc(a, cap, sizeof(%s), NI_ALIGNOF(%s)), .len = cap},",
+            fprintf(out, "\n        .%.*s = (%s){.data = (%s *)ni_arena_alloc(a, cap, sizeof(%s), NI_ALIGNOF(%s)), .len = cap},",
                     (int)te->fields[f].name_length, te->fields[f].name_start,
                     codegen_type_to_c(slice_type),
                     codegen_type_to_c(elem_type),
@@ -13085,13 +13109,15 @@ static void codegen_emit_ir(FILE *out, Ast *ast) {
         const char *row_c = row_buf;
         fprintf(out, "static %s %s__get(const %s *t, int64_t idx) {\n",
                 row_c, mname, tc);
-        fprintf(out, "    if ((uint64_t)idx >= (uint64_t)t->ni__len) {\n");
-        fprintf(out, "        fprintf(stderr, \"error[R002]: Table index out of bounds: %%ld not in [0, %%ld)\\n\", (long)idx, (long)t->ni__len);\n");
-        fprintf(out, "        exit(2);\n");
-        fprintf(out, "    }\n");
+        if (g_bounds_check) {
+            fprintf(out, "    if ((uint64_t)idx >= (uint64_t)t->ni__len) {\n");
+            fprintf(out, "        fprintf(stderr, \"error[R002]: Table index out of bounds: %%ld not in [0, %%ld)\\n\", (long)idx, (long)t->ni__len);\n");
+            fprintf(out, "        exit(2);\n");
+            fprintf(out, "    }\n");
+        }
         fprintf(out, "    return (%s){", row_c);
         for (size_t f = 0; f < te->field_count; f++) {
-            fprintf(out, ".ni_%.*s = t->ni_%.*s.data[idx]",
+            fprintf(out, ".%.*s = t->%.*s.data[idx]",
                     (int)te->fields[f].name_length, te->fields[f].name_start,
                     (int)te->fields[f].name_length, te->fields[f].name_start);
             if (f + 1 < te->field_count) fprintf(out, ", ");
@@ -13102,12 +13128,12 @@ static void codegen_emit_ir(FILE *out, Ast *ast) {
         fprintf(out, "static void %s__insert(%s *t, %s row) {\n",
                 mname, tc, row_c);
         /* Use first column's .len as capacity */
-        fprintf(out, "    if (t->ni__len >= t->ni_%.*s.len) {\n",
+        fprintf(out, "    if (t->ni__len >= t->%.*s.len) {\n",
                 (int)te->fields[0].name_length, te->fields[0].name_start);
         fprintf(out, "        fprintf(stderr, \"Table capacity exceeded\\n\"); exit(2);\n");
         fprintf(out, "    }\n");
         for (size_t f = 0; f < te->field_count; f++) {
-            fprintf(out, "    t->ni_%.*s.data[t->ni__len] = row.ni_%.*s;\n",
+            fprintf(out, "    t->%.*s.data[t->ni__len] = row.%.*s;\n",
                     (int)te->fields[f].name_length, te->fields[f].name_start,
                     (int)te->fields[f].name_length, te->fields[f].name_start);
         }
@@ -13189,7 +13215,7 @@ static void codegen_emit_ir(FILE *out, Ast *ast) {
 }
 
 static void codegen_print_ir(Ast *ast) {
-    printf("=== IR (C CODE) ===\n");
+    // printf("=== IR (C CODE) ===\n");
     codegen_emit_ir(stdout, ast);
     printf("\n");
 }
@@ -13414,6 +13440,8 @@ int main(int argc, char **argv) {
     const char *compiler_root_arg = NULL;
     int emit_c_mode = 0;
     CompilerFlags flags = {0};
+
+    flags.print_ir = 1; // generate C language backend IR by default
 
     /* Extra arguments after -- (forwarded to program in --run mode) */
     int extra_argc = 0;
