@@ -8,11 +8,11 @@ BIN_DIR="$ROOT_DIR/tmp/bootstrap/bins"
 
 mkdir -p "$BIN_DIR"
 
-run_case() {
+run_case_file() {
     local name="$1"
     local expected_code="$2"
     local require_location="$3"
-    local src="$BIN_DIR/bounds_${name}.nore"
+    local src="$4"
     local output=""
     local status=0
 
@@ -42,6 +42,15 @@ run_case() {
             exit 1
         fi
     fi
+}
+
+run_case() {
+    local name="$1"
+    local expected_code="$2"
+    local require_location="$3"
+    local src="$BIN_DIR/bounds_${name}.nore"
+
+    run_case_file "$name" "$expected_code" "$require_location" "$src"
 }
 
 run_success_case() {
@@ -117,12 +126,7 @@ func main(): void = {
 }
 EOF
 
-table_get_location="yes"
-if [ "${COMPILER_TEST_MODE:-norec}" = "stage0" ]; then
-    table_get_location="no"
-fi
-
-run_case "table_get" "R002" "$table_get_location" <<'EOF'
+run_case "table_get" "R002" "yes" <<'EOF'
 table Pair {
     item: i64
 }
@@ -132,6 +136,18 @@ func main(): void = {
     mut pairs: Pair = table_alloc(mut ref mem, 1)
     val row: Pair.Row = table_get(ref pairs, 0)
     assert row.item == 0
+}
+EOF
+
+run_case_file "table_get_escaped_path" "R002" "yes" "$BIN_DIR/bounds_table_get_escaped_\"path.nore" <<'EOF'
+table Pair {
+    item: i64
+}
+
+func main(): void = {
+    mut mem: Arena = arena(64)
+    mut pairs: Pair = table_alloc(mut ref mem, 1)
+    val row: Pair.Row = table_get(ref pairs, 0)
 }
 EOF
 

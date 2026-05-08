@@ -43,3 +43,29 @@ if ! printf '%s\n' "$assert_output" | grep -q -- "Assertion failed"; then
     echo "$assert_output"
     exit 1
 fi
+
+ASSERT_ESCAPED_SRC="$BIN_DIR/assert_runtime_escaped_\"path.nore"
+
+cat > "$ASSERT_ESCAPED_SRC" <<'EOF'
+func main(): void = {
+    assert false
+}
+EOF
+
+escaped_output=""
+set +e
+escaped_output=$("$COMPILER_BIN" --run "$ASSERT_ESCAPED_SRC" 2>&1)
+escaped_status=$?
+set -e
+
+if [ "$escaped_status" -ne 2 ]; then
+    echo "escaped-path assert exited with $escaped_status, expected 2"
+    echo "$escaped_output"
+    exit 1
+fi
+
+if ! printf '%s\n' "$escaped_output" | grep -Eq -- "$(basename "$ASSERT_ESCAPED_SRC"):[0-9]+:[0-9]+: error\\[R001\\]"; then
+    echo "escaped-path assert output does not include source location"
+    echo "$escaped_output"
+    exit 1
+fi
